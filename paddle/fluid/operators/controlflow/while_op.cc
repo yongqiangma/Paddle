@@ -19,7 +19,6 @@
 #include "paddle/fluid/framework/operator.h"
 #include "paddle/fluid/framework/var_type.h"
 #include "paddle/fluid/operators/controlflow/while_op_helper.h"
-#include "paddle/fluid/operators/detail/safe_ref.h"
 
 namespace paddle {
 namespace operators {
@@ -198,23 +197,18 @@ class WhileGradOp : public framework::OperatorBase {
           continue;
         }
 
-        auto &og_outside =
-            detail::Ref(scope.FindVar(outside_og_name),
-                        "Cannot find Outside Gradient %s", outside_og_name);
-        auto &og_inside =
-            detail::Ref(cur_scope.Var(inside_og_name),
-                        "Cannot find inside gradient %s", inside_og_name);
+        auto &og_outside = *scope.FindVar(outside_og_name);
+        auto &og_inside = *cur_scope.Var(inside_og_name);
         if (og_outside.IsType<framework::LoDTensor>()) {
           auto &outside_tensor = og_outside.Get<framework::LoDTensor>();
-          auto &inside_tensor =
-              detail::Ref(og_inside.GetMutable<framework::LoDTensor>());
+          auto &inside_tensor = *og_inside.GetMutable<framework::LoDTensor>();
           inside_tensor.set_lod(outside_tensor.lod());
           inside_tensor.ShareDataWith(outside_tensor);
         } else if (og_outside.IsType<framework::LoDTensorArray>()) {
           auto outside_array =
               og_outside.GetMutable<framework::LoDTensorArray>();
           auto &inside_array =
-              detail::Ref(og_inside.GetMutable<framework::LoDTensorArray>());
+              *og_inside.GetMutable<framework::LoDTensorArray>();
           inside_array.clear();
           inside_array.resize(outside_array->size());
           VLOG(8) << outside_og_name << " size = " << outside_array->size();
@@ -404,18 +398,19 @@ class WhileGradOpMaker : public framework::SingleGradOpMaker<T> {
   }
 };
 
-class WhileGradOpVarTypeInference : public framework::VarTypeInference {
+class WhileGradOpVarTypeInference
+    : public framework::StaticGraphVarTypeInference {
  public:
   void operator()(framework::InferVarTypeContext *ctx) const override {
-    auto p_names = ctx->Input(kX);
-    auto pg_ig_names = ctx->Output(framework::GradVarName(kX));
+    auto p_names = Input(ctx, kX);
+    auto pg_ig_names = Output(ctx, framework::GradVarName(kX));
 
     for (size_t i = 0; i < p_names.size(); ++i) {
-      if (ctx->HasVar(pg_ig_names[i])) {
+      if (HasVar(ctx, pg_ig_names[i])) {
         VLOG(5) << "Setting " << pg_ig_names[i] << " following " << p_names[i]
-                << " type: " << ctx->GetType(p_names[i]);
-        ctx->SetType(pg_ig_names[i], ctx->GetType(p_names[i]));
-        ctx->SetDataType(pg_ig_names[i], ctx->GetDataType(p_names[i]));
+                << " type: " << GetType(ctx, p_names[i]);
+        SetType(ctx, pg_ig_names[i], GetType(ctx, p_names[i]));
+        SetDataType(ctx, pg_ig_names[i], GetDataType(ctx, p_names[i]));
       }
     }
   }

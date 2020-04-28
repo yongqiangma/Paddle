@@ -13,11 +13,13 @@
 # limitations under the License.
 
 from __future__ import print_function
+import six
 from six.moves import reduce
 from ..layer_helper import LayerHelper
 from ..param_attr import ParamAttr
-from ..framework import convert_np_dtype_to_dtype_, in_dygraph_mode, _varbase_creator
-from ..framework import Variable
+from ..initializer import Initializer
+from ..framework import convert_np_dtype_to_dtype_, in_dygraph_mode, _varbase_creator, device_guard, OpProtoHolder
+from ..framework import Variable, in_dygraph_mode
 from ..initializer import Constant
 from ..core import VarDesc
 from .. import core
@@ -28,11 +30,38 @@ import numpy
 import warnings
 
 __all__ = [
-    'create_tensor', 'create_parameter', 'create_global_var', 'cast',
-    'tensor_array_to_tensor', 'concat', 'sums', 'assign',
-    'fill_constant_batch_size_like', 'fill_constant', 'argmin', 'argmax',
-    'argsort', 'ones', 'zeros', 'reverse', 'has_inf', 'has_nan', 'isfinite',
-    'range', 'linspace', 'zeros_like', 'ones_like', 'diag', 'eye'
+    'create_tensor',
+    'create_parameter',
+    'create_global_var',
+    'cast',
+    'tensor_array_to_tensor',
+    'concat',
+    'sums',
+    'assign',
+    'fill_constant_batch_size_like',
+    'fill_constant',
+    'argmin',
+    'argmax',
+    'argsort',
+    'ones',
+    'zeros',
+    'reverse',
+    'has_inf',
+    'has_nan',
+    'isfinite',
+    'range',
+    'linspace',
+    'full_like',
+    'zeros_like',
+    'ones_like',
+    'diag',
+    'eye',
+    'kron',
+    'arange',
+    'full',
+    'tril',
+    'triu',
+    'trace',
 ]
 
 
@@ -57,6 +86,10 @@ def create_tensor(dtype, name=None, persistable=False):
           import paddle.fluid as fluid
           tensor = fluid.layers.create_tensor(dtype='float32')
     """
+    check_dtype(dtype, 'dtype', [
+        'bool', 'float16', 'float32', 'float64', 'int8', 'int32', 'int32',
+        'int64'
+    ], 'create_tensor')
     helper = LayerHelper("create_tensor", **locals())
     return helper.create_variable(
         name=helper.name, dtype=dtype, persistable=persistable)
@@ -97,10 +130,30 @@ def create_parameter(shape,
             import paddle.fluid.layers as layers
             W = layers.create_parameter(shape=[784, 200], dtype='float32')
     """
+    check_type(shape, 'shape', (list, tuple, numpy.ndarray), 'create_parameter')
+    for item in shape:
+        if six.PY2:
+            check_type(item, 'item of shape',
+                       (int, long, numpy.uint8, numpy.int8, numpy.int16,
+                        numpy.int32, numpy.int64), 'create_parameter')
+        else:
+            check_type(item, 'item of shape',
+                       (int, numpy.uint8, numpy.int8, numpy.int16, numpy.int32,
+                        numpy.int64), 'create_parameter')
+
+    check_dtype(dtype, 'dtype', [
+        'bool', 'float16', 'float32', 'float64', 'int8', 'int16', 'int32',
+        'int64', 'uint8'
+    ], 'create_parameter')
+    check_type(attr, 'attr', (type(None), ParamAttr), 'create_parameter')
+    check_type(default_initializer, 'default_initializer',
+               (type(None), Initializer), 'create_parameter')
+
     helper = LayerHelper("create_parameter", **locals())
     if attr is None:
         attr = ParamAttr(name=name)
-    return helper.create_parameter(attr, shape, dtype, is_bias,
+    return helper.create_parameter(attr, shape,
+                                   convert_dtype(dtype), is_bias,
                                    default_initializer)
 
 
@@ -134,8 +187,25 @@ def create_global_var(shape,
             import paddle.fluid as fluid
             import paddle.fluid.layers as layers
             var = layers.create_global_var(shape=[2,3], value=1.0, dtype='float32',
-                                          persistable=True, force_cpu=True, name='new_var')
+                                           persistable=True, force_cpu=True, name='new_var')
     """
+    check_type(shape, 'shape', (list, tuple, numpy.ndarray),
+               'create_global_var')
+    for item in shape:
+        if six.PY2:
+            check_type(item, 'item of shape',
+                       (int, long, numpy.uint8, numpy.int8, numpy.int16,
+                        numpy.int32, numpy.int64), 'create_global_var')
+        else:
+            check_type(item, 'item of shape',
+                       (int, numpy.uint8, numpy.int8, numpy.int16, numpy.int32,
+                        numpy.int64), 'create_global_var')
+
+    check_dtype(dtype, 'dtype', [
+        'bool', 'float16', 'float32', 'float64', 'int8', 'int16', 'int32',
+        'int64', 'uint8'
+    ], 'create_global_var')
+
     helper = LayerHelper("global_var", **locals())
     var = helper.create_global_variable(
         dtype=dtype,
@@ -160,7 +230,7 @@ def cast(x, dtype):
         x(Variable): An input N-D Tensor with data type bool, float16,
             float32, float64, int32, int64, uint8.
         dtype(np.dtype|core.VarDesc.VarType|str): Data type of the output:
-            bool, float15, float32, float64, int8, int32, int64, uint8.
+            bool, float16, float32, float64, int8, int32, int64, uint8.
 
     Returns:
         Variable: A Tensor with the same shape as input's.
@@ -192,11 +262,16 @@ def cast(x, dtype):
             # [[ 1 -2]
             #  [ 0  4]] int32
     """
-    helper = LayerHelper('cast', **locals())
     check_variable_and_dtype(
         x, 'x',
         ['bool', 'float16', 'float32', 'float64', 'int32', 'int64', 'uint8'],
         'cast')
+    check_dtype(dtype, 'dtype', [
+        'bool', 'float16', 'float32', 'float64', 'int8', 'int32', 'int64',
+        'uint8'
+    ], 'cast')
+
+    helper = LayerHelper('cast', **locals())
     out = helper.create_variable_for_type_inference(dtype=dtype)
     helper.append_op(
         type='cast',
@@ -381,6 +456,22 @@ def tensor_array_to_tensor(input, axis=1, name=None, use_stack=False):
             fluid.layers.array_write(x1, i + 1, array)
             output, output_index = fluid.layers.tensor_array_to_tensor(input=array)
     """
+    if in_dygraph_mode():
+        assert isinstance(
+            input, list), "The 'input' in tensor_array_to_tensor must be list"
+        from .nn import stack, concat
+        from ..dygraph import to_variable
+        op = stack if use_stack else concat
+        res = op(input, axis=axis)
+        sizes = to_variable(
+            numpy.array(list(map(lambda x: int(x.shape[axis]), input))))
+        return res, sizes
+
+    check_type(input, 'input', (list, Variable), 'tensor_array_to_tensor')
+    if isinstance(input, list):
+        for i, input_x in enumerate(input):
+            check_type(input_x, 'input[' + str(i) + ']', Variable,
+                       'tensor_array_to_tensor')
     helper = LayerHelper('tensor_array_to_tensor', **locals())
     out = helper.create_variable_for_type_inference(dtype=helper.input_dtype())
     out_index = helper.create_variable_for_type_inference(dtype="int32")
@@ -444,10 +535,23 @@ def sums(input, out=None):
             # Sum of multiple Tensors, sum1 and x3 represents the same Variable (x3=x0+x1+x2, the value is [[6, ..., 6], ..., [6, ..., 6]])
             sum1 = fluid.layers.sums(input=[x0, x1, x2], out=x3)
     """
+    check_type(input, 'input', (Variable, tuple, list), 'sums')
+    if isinstance(input, list) or isinstance(input, tuple):
+        for input_section in input:
+            check_variable_and_dtype(input_section, "input", \
+                    ['float32', 'float64', 'int32', 'int64'], 'sums')
+    else:
+        check_variable_and_dtype(input, "input", \
+                ['float32', 'float64', 'int32', 'int64'], 'sums')
+
     helper = LayerHelper('sum', **locals())
     if out is None:
         out = helper.create_variable_for_type_inference(
             dtype=helper.input_dtype())
+    else:
+        check_variable_and_dtype(
+            out, "out", ['float32', 'float64', 'int32', 'int64'], 'sums')
+
     helper.append_op(
         type='sum',
         inputs={'X': input},
@@ -493,7 +597,10 @@ def assign(input, output=None):
             type='assign', inputs={'X': [input]}, outputs={'Out': [output]})
     elif isinstance(input, numpy.ndarray):
         dtype = convert_np_dtype_to_dtype_(input.dtype)
-        if dtype == VarDesc.VarType.FP32:
+        if dtype == VarDesc.VarType.BOOL:
+            value_name = "bool_values"
+            values = [bool(v) for v in input.flat]
+        elif dtype == VarDesc.VarType.FP32:
             value_name = "fp32_values"
             values = [float(v) for v in input.flat]
         elif dtype == VarDesc.VarType.INT32:
@@ -505,7 +612,7 @@ def assign(input, output=None):
         else:
             raise TypeError(
                 "When the type of 'input' in assign is numpy.ndarray, "
-                "the data type of 'input' must be float32, int32 or int64, but "
+                "the data type of 'input' must be bool, float32, int32 or int64, but "
                 "received %s." % convert_dtype(dtype))
         if input.size > 1024 * 1024:
             raise ValueError("The size of input is too big. Please consider "
@@ -539,8 +646,9 @@ def fill_constant(shape, dtype, value, force_cpu=False, out=None):
                 If ``shape`` is an Variable, it should be an 1-D Tensor .
         dtype(np.dtype|core.VarDesc.VarType|str): Data type of the output tensor which can
             be float16, float32, float64, int32, int64.
-        value(float): The constant value used to initialize the Tensor to be created.
-        force_cpu(True): data should be on CPU if it's true, default value is False.
+        value(float16|float32|float64|int32|int64|Variable): The constant value used to initialize 
+            the Tensor to be created. If value is an Variable, it should be an 1-D Tensor.
+        force_cpu(bool): data should be on CPU if it's true, default value is False.
         out(Variable, optional): Optional output which can be any created 
             Variable that meets the requirements to store the result of operation.
             if out is None, a new Varibale will be create to store the result.
@@ -559,7 +667,7 @@ def fill_constant(shape, dtype, value, force_cpu=False, out=None):
           # attr shape is a list which doesn't contain Variable Tensor.
           data1 = fluid.layers.fill_constant(shape=[2,1], value=0, dtype='int64') # data1=[[0],[0]]
           data2 = fluid.layers.fill_constant(shape=[2,1], value=5, dtype='int64', out=data1)
-          # data1=[[0], [0]] data2=[[5], [5]]
+          # data1=[[5], [5]] data2=[[5], [5]]
 
           # attr shape is a list which contains Variable Tensor.
           positive_2 = fluid.layers.fill_constant([1], "int32", 2)
@@ -568,13 +676,21 @@ def fill_constant(shape, dtype, value, force_cpu=False, out=None):
           # attr shape is an Variable Tensor.
           shape = fluid.layers.fill_constant([1,2], "int32", 2) # shape=[2,2]
           data4 = fluid.layers.fill_constant(shape=shape, dtype='bool', value=True) # data4=[[True,True],[True,True]]
+          
+          # attr value is an Variable Tensor.
+          val = fluid.layers.fill_constant([1], "float32", 2.0) # val=[2.0]
+          data5 = fluid.layers.fill_constant(shape=[2,1], value=val, dtype='float32') #data5=[[2.0],[2.0]]
     """
-    attrs = {'value': float(value), 'force_cpu': force_cpu}
-
-    if convert_dtype(dtype) in ['int64', 'int32']:
-        attrs['str_value'] = str(int(value))
+    inputs = {}
+    attrs = {'force_cpu': force_cpu}
+    if isinstance(value, Variable):
+        inputs['ValueTensor'] = value
     else:
-        attrs['str_value'] = str(float(value))
+        attrs['value'] = float(value)
+        if convert_dtype(dtype) in ['int64', 'int32']:
+            attrs['str_value'] = str(int(value))
+        else:
+            attrs['str_value'] = str(float(value))
 
     if in_dygraph_mode():
         if isinstance(shape, (list, tuple)):
@@ -583,79 +699,43 @@ def fill_constant(shape, dtype, value, force_cpu=False, out=None):
                     shape))
         else:
             shape = list(shape.numpy().astype(int))
-        dtype = convert_np_dtype_to_dtype_(dtype)
         if out is None:
             out = _varbase_creator(dtype=dtype)
+
+        if isinstance(value, Variable):
+            if convert_dtype(dtype) in ['int64', 'int32']:
+                attrs['str_value'] = str(int(value.numpy()))
+            else:
+                attrs['str_value'] = str(float(value.numpy()))
+
         core.ops.fill_constant(out, 'value',
                                float(value), 'force_cpu', force_cpu, 'dtype',
-                               dtype, 'str_value', attrs['str_value'], 'shape',
-                               shape)
+                               out.dtype, 'str_value', attrs['str_value'],
+                               'shape', shape)
         out.stop_gradient = True
         return out
 
-    helper = LayerHelper("fill_constant", **locals())
-    check_dtype(dtype, 'create data type',
+    check_dtype(dtype, 'dtype',
                 ['bool', 'float16', 'float32', 'float64', 'int32', 'int64'],
                 'fill_constant')
     check_type(shape, 'shape', (Variable, list, tuple), 'fill_constant')
-    inputs = {}
-    attrs = {'value': float(value), 'force_cpu': force_cpu}
-
-    if convert_dtype(dtype) in ['int64', 'int32']:
-        attrs['str_value'] = str(int(value))
-    else:
-        attrs['str_value'] = str(float(value))
-
-    def _get_attr_shape(list_shape):
-        attr_shape = []
-        for idx, dim in enumerate(list_shape):
-            if isinstance(dim, Variable):
-                attr_shape.append(-1)
-            else:
-                attr_shape.append(dim)
-        return attr_shape
-
-    def _get_shape_tensor(list_shape):
-        new_shape_tensor = []
-        for idx, dim in enumerate(list_shape):
-            if isinstance(dim, Variable):
-                dim.stop_gradient = True
-                check_dtype(
-                    dim.dtype, 'shape[' + str(idx) + ']', ['int32', 'int64'],
-                    'fill_constant',
-                    '(When type of shape in fill_constant is list or tuple.)')
-                if convert_dtype(dim.dtype) == 'int64':
-                    dim = cast(x=dim, dtype='int32')
-                new_shape_tensor.append(dim)
-            else:
-                temp_out = helper.create_variable_for_type_inference('int32')
-                fill_constant([1], 'int32', dim, force_cpu=True, out=temp_out)
-                new_shape_tensor.append(temp_out)
-        return new_shape_tensor
-
     if isinstance(shape, Variable):
-        shape.stop_gradient = True
-        check_dtype(shape.dtype, 'shape', ['int32', 'int64'], 'fill_constant',
-                    '(When type of shape in fill_constant is Variable.)')
-        if (convert_dtype(shape.dtype) == 'int64'):
-            shape = cast(shape, 'int32')
-        inputs["ShapeTensor"] = shape
-    elif isinstance(shape, (list, tuple)):
-        assert len(shape) > 0, (
-            "The size of 'shape' in fill_constant can't be zero, "
-            "but received %s." % len(shape))
-        attrs["shape"] = _get_attr_shape(shape)
-        if utils._contain_var(shape):
-            inputs['ShapeTensorList'] = _get_shape_tensor(shape)
+        check_variable_and_dtype(shape, 'shape', ['int32', 'int64'],
+                                 'fill_constant')
+    if out is not None:
+        check_variable_and_dtype(out, 'out', [convert_dtype(dtype)],
+                                 'fill_constant')
+
+    helper = LayerHelper("fill_constant", **locals())
+    inputs = utils._get_shape_tensor_inputs(
+        inputs=inputs,
+        helper=helper,
+        attrs=attrs,
+        shape=shape,
+        op_type='fill_constant')
 
     if out is None:
         out = helper.create_variable_for_type_inference(dtype=dtype)
-    else:
-        check_dtype(
-            dtype, 'create data type',
-            convert_dtype(out.dtype), 'fill_constant',
-            '(The create data type in fill_constant must be the same with out data type.)'
-        )
     attrs['dtype'] = out.dtype
     helper.append_op(
         type='fill_constant',
@@ -781,6 +861,9 @@ def argmin(x, axis=0):
                 # [[0 0 2]
                 #  [1 0 2]]
     """
+    check_variable_and_dtype(
+        x, 'x', ['float32', 'float64', 'uint8', 'int16', 'int32', 'int64'],
+        'argmin')
     helper = LayerHelper("arg_min", **locals())
     out = helper.create_variable_for_type_inference(VarDesc.VarType.INT64)
     helper.append_op(
@@ -841,6 +924,9 @@ def argmax(x, axis=0):
                 # [[2 3 1]
                 #  [0 3 1]]
     """
+    check_variable_and_dtype(
+        x, 'x', ['float32', 'float64', 'uint8', 'int16', 'int32', 'int64'],
+        'argmax')
     helper = LayerHelper("arg_max", **locals())
     out = helper.create_variable_for_type_inference(VarDesc.VarType.INT64)
     helper.append_op(
@@ -922,6 +1008,9 @@ def argsort(input, axis=-1, descending=False, name=None):
                 #   [4. 7. 4. 6.]
                 #   [5. 7. 7. 9.]]]
     """
+    check_variable_and_dtype(
+        input, 'input',
+        ['float32', 'float64', 'int16', 'int32', 'int64', 'uint8'], 'argsort')
     helper = LayerHelper("argsort", **locals())
     out = helper.create_variable_for_type_inference(
         dtype=input.dtype, stop_gradient=True)
@@ -959,8 +1048,10 @@ def ones(shape, dtype, force_cpu=False):
           import paddle.fluid as fluid
           data = fluid.layers.ones(shape=[2, 4], dtype='float32') # [[1., 1., 1., 1.], [1., 1., 1., 1.]]
     """
-    assert isinstance(shape, list) or isinstance(
-        shape, tuple), "The shape's type should be list or tuple."
+    check_type(shape, 'shape', (list, tuple), 'ones')
+    check_dtype(dtype, 'create data type',
+                ['bool', 'float16', 'float32', 'float64', 'int32', 'int64'],
+                'ones')
     assert reduce(lambda x, y: x * y,
                   shape) > 0, "The shape is invalid: %s." % (str(shape))
     return fill_constant(value=1.0, **locals())
@@ -988,6 +1079,7 @@ def zeros(shape, dtype, force_cpu=False):
           import paddle.fluid as fluid
           data = fluid.layers.zeros(shape=[3, 2], dtype='float32') # [[0., 0.], [0., 0.], [0., 0.]]
     """
+    check_type(shape, 'shape', (list, tuple), 'zeros')
     check_dtype(dtype, 'create data type',
                 ['bool', 'float16', 'float32', 'float64', 'int32', 'int64'],
                 'zeros')
@@ -1119,6 +1211,7 @@ def has_inf(x):
           res = fluid.layers.has_inf(data)
 
     """
+    check_type(x, 'x', (Variable), 'has_inf')
     helper = LayerHelper("isinf", **locals())
     out = helper.create_variable_for_type_inference(dtype=x.dtype)
     helper.append_op(type="isinf", inputs={"X": x}, outputs={"Out": out})
@@ -1143,6 +1236,7 @@ def has_nan(x):
           res = fluid.layers.has_nan(data)
 
     """
+    check_type(x, 'x', (Variable), 'has_nan')
     helper = LayerHelper("isnan", **locals())
     out = helper.create_variable_for_type_inference(dtype=x.dtype)
     helper.append_op(type="isnan", inputs={"X": x}, outputs={"Out": out})
@@ -1170,8 +1264,11 @@ def isfinite(x):
                                     dtype="float32")
             out = fluid.layers.isfinite(var)
     """
+    check_variable_and_dtype(x, "x", ["float32", "float64", "int32", "int64"],
+                             "isfinite")
     helper = LayerHelper("isfinite", **locals())
-    out = helper.create_variable_for_type_inference(dtype=x.dtype)
+
+    out = helper.create_variable_for_type_inference(dtype='bool')
     helper.append_op(type="isfinite", inputs={"X": x}, outputs={"Out": out})
     return out
 
@@ -1269,12 +1366,25 @@ def linspace(start, stop, num, dtype):
     """
     helper = LayerHelper("linspace", **locals())
 
+    check_type(start, 'start', (Variable, float, int), linspace)
+    check_type(stop, 'stop', (Variable, float, int), linspace)
+    check_type(num, 'num', (Variable, float, int), linspace)
+
     if not isinstance(start, Variable):
         start = fill_constant([1], dtype, start)
+    else:
+        check_variable_and_dtype(start, "start", ["float32", "float64"],
+                                 "linspace")
+
     if not isinstance(stop, Variable):
         stop = fill_constant([1], dtype, stop)
+    else:
+        check_variable_and_dtype(stop, "stop", ["float32", "float64"],
+                                 "linspace")
     if not isinstance(num, Variable):
         num = fill_constant([1], 'int32', num)
+    else:
+        check_variable_and_dtype(num, "num", ["int32"], "linspace")
 
     out = helper.create_variable_for_type_inference(dtype=start.dtype)
 
@@ -1284,6 +1394,70 @@ def linspace(start, stop, num, dtype):
                 'Stop': stop,
                 'Num': num},
         outputs={'Out': [out]})
+    return out
+
+
+def full_like(input,
+              fill_value,
+              out=None,
+              dtype=None,
+              device=None,
+              stop_gradient=True,
+              name=None):
+    """
+    **full_like**
+    This function creates a tensor filled with `fill_value` which has identical shape and dtype 
+    with `input`.
+
+    Args:
+        input(Variable): The input tensor which specifies shape and data type. The data type can be bool, float16, float32, float64, int32, int64.
+        fill_value(bool|float|int): The value to fill the tensor with. Default value is 0. Note: this value shouldn't exceed the range of the output data type.
+        out(Variable, optional): Optional output which can be any created Variable that meets the requirements to store the result of operation. If out is None, a new Varibale will be create to store the result. Default value is None.
+        dtype(np.dtype|core.VarDesc.VarType|str, optional): The data type of output. The default value is None, which means the output data type is the same as input.
+        device (string, optional): Which device to run the operator. The :attr:`device` must be None, 'cpu', 'gpu'. If :attr:`device` is None, it will be the device that the user set in the paddle program. Default value is None.
+        stop_gradient(bool, optional): Indicating if we stop gradient from current(out) Variable. Default value is True.
+        name(str, optional): The default value is None. Normally there is no need for user to set this property. For more information, please refer to :ref:`api_guide_Name`
+    
+    Returns:
+        out(Variable): The Tensor variable storing the output.
+    
+    Examples:
+        .. code-block:: python
+
+          import paddle
+          import paddle.fluid as fluid
+          import numpy as np
+          input = fluid.data(name='input', dtype='float32', shape=[2, 3])
+          output = fluid.layers.full_like(input, 2.0)
+          exe = fluid.Executor(fluid.CPUPlace())
+          exe.run(fluid.default_startup_program())
+          img=np.array([[1, 2, 3], [4, 5, 6]]).astype(np.float32)
+          res = exe.run(fluid.default_main_program(), feed={'input':img}, fetch_list=[output])
+          print(res) # [array([[2., 2., 2.], [2., 2., 2.]], dtype=float32)]
+    """
+    helper = LayerHelper("full_like", **locals())
+
+    var_dtype = None
+    if dtype is None:
+        var_dtype = input.dtype
+    else:
+        check_dtype(
+            dtype, 'dtype',
+            ['bool', 'float16', 'float32', 'float64', 'int32', 'int64'],
+            'full_like')
+        var_dtype = convert_np_dtype_to_dtype_(dtype)
+
+    if out is None:
+        out = helper.create_variable_for_type_inference(dtype=dtype)
+
+    helper.append_op(
+        type='fill_any_like',
+        inputs={'X': [input]},
+        attrs={'value': fill_value,
+               "dtype": var_dtype},
+        outputs={'Out': [out]})
+    out.stop_gradient = stop_gradient
+
     return out
 
 
@@ -1311,9 +1485,16 @@ def zeros_like(x, out=None):
 
     """
 
+    check_variable_and_dtype(
+        x, "x", ['bool', 'float32', 'float64', 'int32', 'int64'], 'ones_like')
     helper = LayerHelper("zeros_like", **locals())
     if out is None:
         out = helper.create_variable_for_type_inference(dtype=x.dtype)
+    else:
+        check_variable_and_dtype(
+            out, "out", ['bool', 'float32', 'float64', 'int32', 'int64'],
+            'ones_like')
+
     helper.append_op(
         type='fill_zeros_like', inputs={'X': [x]}, outputs={'Out': [out]})
     out.stop_gradient = True
@@ -1346,7 +1527,9 @@ def diag(diagonal):
           # diagonal.shape=(3,) data.shape=(3, 3)
 
     """
-
+    check_type(diagonal, 'diagonal', (Variable, numpy.ndarray), 'diag')
+    check_dtype(diagonal.dtype, 'diagonal',
+                ['float32', 'float64', 'int32', 'int64'], 'diag')
     helper = LayerHelper("diag", **locals())
 
     if not isinstance(diagonal, Variable):
@@ -1456,13 +1639,537 @@ def ones_like(x, out=None):
           data = fluid.layers.ones_like(x) # [1.0, 1.0, 1.0]
 
     """
+    check_variable_and_dtype(
+        x, "x", ['bool', 'float32', 'float64', 'int32', 'int64'], 'ones_like')
 
     helper = LayerHelper("ones_like", **locals())
     if out is None:
         out = helper.create_variable_for_type_inference(dtype=x.dtype)
+    else:
+        check_variable_and_dtype(
+            out, "out", ['bool', 'float32', 'float64', 'int32', 'int64'],
+            'ones_like')
     helper.append_op(
         type='fill_any_like',
         inputs={'X': [x]},
         attrs={'value': 1.0},
+        outputs={'Out': [out]})
+    return out
+
+
+def arange(start, end, step=1, dtype=None, name=None):
+    """
+    Return evenly spaced values within a given interval.
+    Values are generated within the half-open interval [start, stop) (in other words,
+    the interval including start but excluding stop).
+    Parameters:
+        start(float32 | float64 | int32 | int64 | Variable): Start of interval. The interval includes this value.
+            when start is Variable, it is a 1-D Tensor with shape [1].
+        end(float32 | float64 | int32 | int64 | Variable): End of interval. The interval does not include this
+                                 value, except in some cases where step is not an integer
+                                 and floating point round-off affects the length of out. When end is Variable,
+                                 it is a 1-D Tensor with shape [1].
+        step(float32 | float64 | int32 | int64 | Variable): Spacing between values. For any output out, this is the
+                                  distance between two adjacent values, out[i+1] - out[i].
+        dtype(str|core.VarDesc.VarType): the data type of the output tensor, can be float32, float64, int32, int64.
+    Returns: a 1-D Tensor which is evenly spaced values within a given interval. Its data type is set by dtype.
+    
+    Return type: Variable
+    examples:
+        .. code-block:: python
+             import paddle.fluid as fluid
+             # expected out put: [0, 2, 4, 6, 8]
+             data = fluid.layers.arange(0, 10, 2, 'int32')
+         #dygraph mode
+             import paddle.fluid as fluid
+             with fluid.dygraph.guard():
+                 x = fluid.layers.arange(0, 6, 2) 
+                 # x: [0, 2, 4]
+                 # x dtype: float32
+             
+    """
+    helper = LayerHelper("range", **locals())
+
+    if dtype is None:
+        dtype = 'float32'
+
+    check_dtype(dtype, 'create data type',
+                ['float32', 'float64', 'int32', 'int64'], 'range')
+
+    dtype = convert_dtype(dtype)
+    if not isinstance(start, Variable):
+        start = fill_constant([1], dtype, start)
+
+    if not isinstance(end, Variable):
+        end = fill_constant([1], dtype, end)
+
+    if not isinstance(step, Variable):
+        step = fill_constant([1], dtype, step)
+
+    out = helper.create_variable_for_type_inference(dtype=start.dtype)
+
+    helper.append_op(
+        type='range',
+        inputs={'Start': start,
+                'End': end,
+                'Step': step},
+        outputs={'Out': [out]})
+    out.stop_gradient = True
+    return out
+
+
+def full(shape,
+         fill_value,
+         out=None,
+         dtype=None,
+         device=None,
+         stop_gradient=True,
+         name=None):
+    """
+    This Op return a Tensor with the `fill_value` which size is same as `shape`
+    
+    Args:
+        shape(list|tuple|Variable): Shape of the Tensor to be created.
+                The data type is ``int32`` or ``int64`` . If ``shape`` is a list or tuple,
+                the elements of it should be integers or Tensors with shape [1].
+                If ``shape`` is an Variable, it should be an 1-D Tensor .
+        fill_value(bool|float16|float32|float64|int32|int64|Variable): The constant value
+            used to initialize the Tensor to be created. If fill_value is an Variable, it must be an 1-D Tensor.
+        out(Variable, optional): Optional output which can be any created 
+            Variable that meets the requirements to store the result of operation.
+            if out is None, a new Varibale will be create to store the result.
+        dtype(np.dtype|core.VarDesc.VarType|str, optional): Data type of the output tensor
+            which can be float16, float32, float64, int32, int64, if dytpe is `None`, the data
+            type of created tensor is `float32`
+        device(str, optional): On which device to run this Op. The :attr:`device` must be
+            None, 'cpu' or 'gpu'. If :attr:`device` is None, the device that the user set in 
+            the paddle program will be chosen. Default value is None.
+        stop_gradient(bool, optional): Indicating if we stop gradient from current(out) Variable,
+            default value is True.
+        name(str, optional): The default value is None.  Normally there is no need for user to set this
+            property.  For more information, please refer to :ref:`api_guide_Name`.
+    
+    Returns:
+        Variable: Tensor which is created according to shape and dtype.
+
+    Raises:
+        TypeError: The `dtype` must be one of None, bool, float16, float32, float64, int32 and int64.
+        TypeError: The `out` must be a Variable.
+        TypeError: The `shape` must be one of Variable, list tuple.
+    
+    Examples:
+        .. code-block:: python
+
+          import paddle.fluid as fluid
+
+          data1 = fluid.layers.full(shape=[2,1], fill_value=0, dtype='int64') # data1=[[0],[0]]
+          data2 = fluid.layers.full(shape=[2,1], fill_value=5, dtype='int64', device='gpu') # data2=[[5],[5]]
+
+          # attr shape is a list which contains Variable Tensor.
+          positive_2 = fluid.layers.fill_constant([1], "int32", 2)
+          data3 = fluid.layers.full(shape=[1, positive_2], dtype='float32', fill_value=1.5) # data3=[1.5, 1.5]
+
+          # attr shape is an Variable Tensor.
+          shape = fluid.layers.fill_constant([1,2], "int32", 2) # shape=[2,2]
+          data4 = fluid.layers.full(shape=shape, dtype='bool', fill_value=True) # data4=[[True,True],[True,True]]
+          
+          # attr value is an Variable Tensor.
+          val = fluid.layers.fill_constant([1], "float32", 2.0) # val=[2.0]
+          data5 = fluid.layers.full(shape=[2,1], fill_value=val, dtype='float32') #data5=[[2.0],[2.0]]
+    """
+
+    helper = LayerHelper("full", **locals())
+
+    if dtype is None:
+        dtype = 'float32'
+
+    check_dtype(dtype, 'create data type',
+                ['bool', 'float16', 'float32', 'float64', 'int32', 'int64'],
+                'full')
+    check_type(shape, 'shape', (Variable, list, tuple), 'full')
+    if out is not None:
+        check_type(shape, 'out', (Variable), 'full')
+
+    if out is None:
+        out = helper.create_variable_for_type_inference(dtype=dtype)
+
+    out.stop_gradient = stop_gradient
+
+    with device_guard(device):
+        out = fill_constant(shape=shape, dtype=dtype, value=fill_value, out=out)
+
+    return out
+
+
+def _tril_triu_op(helper):
+    """Base op of tril_op and triu_op
+    """
+    op_type = helper.layer_type
+    x = helper.kwargs.get('input', None)
+
+    assert x is not None, 'x cannot be None in {}'.format(op_type)
+    check_variable_and_dtype(x, 'x', ['float32', 'float64', 'int32', 'int64'],
+                             op_type)
+    if len(x.shape) < 2:
+        raise ValueError("input shape in {} must be at least 2-D".format(
+            op_type))
+    diagonal = helper.kwargs.get('diagonal', 0)
+    if not isinstance(diagonal, (int, )):
+        raise TypeError("diagonal in {} must be a python Int".format(op_type))
+    name = helper.kwargs.get('name', None)
+
+    if name is None:
+        out = helper.create_variable_for_type_inference(dtype=x.dtype)
+    else:
+        out = helper.create_variable(
+            name=name, dtype=x.dtype, persistable=False)
+
+    helper.append_op(
+        type="tril_triu",
+        inputs={"X": x},
+        attrs={
+            "diagonal": diagonal,
+            "lower": True if op_type == 'tril' else False,
+        },
+        outputs={"Out": out}, )
+
+    return out
+
+
+def tril(input, diagonal=0, name=None):
+    """
+    This op returns the lower triangular part of a matrix (2-D tensor) or batch
+    of matrices :attr:`input`, the other elements of the result tensor are set 
+    to 0. The lower triangular part of the matrix is defined as the elements 
+    on and below the diagonal.
+
+    Args:
+        input (Variable): The input variable which is a Tensor.
+            Support data types: ``float64``, ``float32``, ``int32``, ``int64``.
+        diagonal (int, optional): The diagonal to consider, default value is 0.
+            If :attr:`diagonal` = 0, all elements on and below the main diagonal are
+            retained. A positive value includes just as many diagonals above the main
+            diagonal, and similarly a negative value excludes just as many diagonals below
+            the main diagonal. The main diagonal are the set of indices
+            :math:`\{(i, i)\}` for :math:`i \in [0, \min\{d_{1}, d_{2}\} - 1]` where
+            :math:`d_{1}, d_{2}` are the dimensions of the matrix.
+        name (str, optional): The default value is None. Normally there is no need for
+            user to set this property. For more information, please refer to :ref:`api_guide_Name`.
+
+    Returns:
+        Variable: Tensor, results of lower triangular operation by the specified diagonal of input tensor,
+        it's data type is the same as input's Tensor.
+
+    Raises:
+        TypeError: diagonal is not a int type.
+        ValueError: dimension of :attr:`input` is less than 2.
+
+    Examples:
+        .. code-block:: python
+
+            import numpy as np
+            import paddle.fluid as fluid
+
+            data = np.arange(1, 13, dtype="int64").reshape(3,-1)
+            # array([[ 1,  2,  3,  4],
+            #        [ 5,  6,  7,  8],
+            #        [ 9, 10, 11, 12]])
+            x = fluid.data(shape=(-1, 4), dtype='int64', name='x')
+            exe = fluid.Executor(fluid.CPUPlace())
+
+            # example 1, default diagonal
+            tril = fluid.layers.tril(x)
+            tril_out, = exe.run(fluid.default_main_program(), feed={"x": data},
+                fetch_list=[tril], return_numpy=True)
+            # array([[ 1,  0,  0,  0],
+            #        [ 5,  6,  0,  0],
+            #        [ 9, 10, 11,  0]])
+
+        .. code-block:: python
+
+            # example 2, positive diagonal value
+            import paddle.fluid as fluid
+            import numpy as np
+
+            data = np.arange(1, 13, dtype="int64").reshape(3,-1)
+            x = fluid.data(shape=(-1, 4), dtype='int64', name='x')
+            exe = fluid.Executor(fluid.CPUPlace())
+
+            tril = fluid.layers.tril(x, diagonal=2)
+            tril_out, = exe.run(fluid.default_main_program(), feed={"x": data},
+                fetch_list=[tril], return_numpy=True)
+            # array([[ 1,  2,  3,  0], 
+            #        [ 5,  6,  7,  8],
+            #        [ 9, 10, 11, 12]])
+
+        .. code-block:: python
+
+            # example 3, negative diagonal value
+            import paddle.fluid as fluid
+            import numpy as np
+
+            data = np.arange(1, 13, dtype="int64").reshape(3,-1)
+            x = fluid.data(shape=(-1, 4), dtype='int64', name='x')
+            exe = fluid.Executor(fluid.CPUPlace())
+
+            tril = fluid.layers.tril(x, diagonal=-1)
+            tril_out, = exe.run(fluid.default_main_program(), feed={"x": data},
+                fetch_list=[tril], return_numpy=True)
+            # array([[ 0,  0,  0,  0],
+            #        [ 5,  0,  0,  0],
+            #        [ 9, 10,  0,  0]])
+
+   """
+
+    return _tril_triu_op(LayerHelper('tril', **locals()))
+
+
+def triu(input, diagonal=0, name=None):
+    """
+    This op returns the upper triangular part of a matrix (2-D tensor) or batch of matrices
+    :attr:`input`, the other elements of the result tensor are set to 0.
+    The upper triangular part of the matrix is defined as the elements on and
+    above the diagonal.
+
+    Args:
+        input (Variable): The input variable which is a Tensor.
+            Support data types: ``float64``, ``float32``, ``int32``, ``int64``.
+        diagonal (int, optional): The diagonal to consider, default value is 0.
+            If :attr:`diagonal` = 0, all elements on and above the main diagonal are
+            retained. A positive value excludes just as many diagonals above the main
+            diagonal, and similarly a negative value includes just as many diagonals below
+            the main diagonal. The main diagonal are the set of indices
+            :math:`\{(i, i)\}` for :math:`i \in [0, \min\{d_{1}, d_{2}\} - 1]` where
+            :math:`d_{1}, d_{2}` are the dimensions of the matrix.
+        name (str, optional): The default value is None. Normally there is no need for
+            user to set this property. For more information, please refer to :ref:`api_guide_Name`.
+
+    Returns:
+        Variable: Tensor, results of upper triangular operation by the specified diagonal of input tensor,
+        it's data type is the same as input's Tensor.
+
+    Raises:
+        TypeError: diagonal is not a int type.
+        ValueError: dimension of :attr:`input` is less than 2.
+
+    Examples:
+        .. code-block:: python
+
+            import numpy as np
+            import paddle.fluid as fluid
+
+            data = np.arange(1, 13, dtype="int64").reshape(3,-1)
+            # array([[ 1,  2,  3,  4],
+            #        [ 5,  6,  7,  8],
+            #        [ 9, 10, 11, 12]])
+            x = fluid.data(shape=(-1, 4), dtype='int64', name='x')
+            exe = fluid.Executor(fluid.CPUPlace())
+
+            # example 1, default diagonal
+            import paddle.fluid as fluid
+            triu = fluid.layers.triu(x)
+            triu_out, = exe.run(fluid.default_main_program(), feed={"x": data},
+                fetch_list=[triu], return_numpy=True)
+            # array([[ 1,  2,  3,  4],
+            #        [ 0,  6,  7,  8],
+            #        [ 0,  0, 11, 12]])
+
+        .. code-block:: python
+
+            # example 2, positive diagonal value
+            import paddle.fluid as fluid
+            import numpy as np
+
+            data = np.arange(1, 13, dtype="int64").reshape(3,-1)
+            x = fluid.data(shape=(-1, 4), dtype='int64', name='x')
+            exe = fluid.Executor(fluid.CPUPlace())
+
+            triu = fluid.layers.triu(x, diagonal=2)
+            triu_out, = exe.run(fluid.default_main_program(), feed={"x": data},
+                fetch_list=[triu], return_numpy=True)
+            # array([[0, 0, 3, 4],
+            #        [0, 0, 0, 8],
+            #        [0, 0, 0, 0]])
+
+        .. code-block:: python
+
+            # example 3, negative diagonal value
+            import paddle.fluid as fluid
+            import numpy as np
+
+            data = np.arange(1, 13, dtype="int64").reshape(3,-1)
+            x = fluid.data(shape=(-1, 4), dtype='int64', name='x')
+            exe = fluid.Executor(fluid.CPUPlace())
+
+            triu = fluid.layers.triu(x, diagonal=-1)
+            triu_out, = exe.run(fluid.default_main_program(), feed={"x": data},
+                fetch_list=[triu], return_numpy=True)
+            # array([[ 1,  2,  3,  4],
+            #        [ 5,  6,  7,  8],
+            #        [ 0, 10, 11, 12]])
+
+    """
+
+    return _tril_triu_op(LayerHelper('triu', **locals()))
+
+
+@templatedoc(op_type="kron")
+def kron(x, y, out=None, name=None):
+    """${comment}
+
+    Args:
+        x (Variable): the fist operand of kron op, data type: float16, float32, 
+            float64, int32 or int64.
+        y (Variable): the second operand of kron op, data type: float16, 
+            float32, float64, int32 or int64. Its data type should be the same 
+            with x.
+        out (Variable, optional): Optional output which can be any created 
+            Variable that meets the requirements to store the result of 
+            operation. If out is None, a new Varibale will be create to store 
+            the result. Defaults to None.
+        name(str, optional): The default value is None.  Normally there is no 
+            need for user to set this property.  For more information, please 
+            refer to :ref:`api_guide_Name`.
+
+    Returns:
+        Variable: The output of kron op, data type: float16, float32, float64, int32 or int64. Its data is the same with x.
+
+    Examples:
+        .. code-block:: python
+        
+          import paddle
+          from paddle import fluid
+          import paddle.fluid.dygraph as dg
+          import numpy as np
+
+          a = np.arange(1, 5).reshape(2, 2).astype(np.float32)
+          b = np.arange(1, 10).reshape(3, 3).astype(np.float32)
+
+          place = fluid.CPUPlace()
+          with dg.guard(place):
+              a_var = dg.to_variable(a)
+              b_var = dg.to_variable(b)
+              c_var = fluid.layers.kron(a_var, b_var)
+              c_np = c_var.numpy()
+          print(c_np)
+
+          #[[ 1.  2.  3.  2.  4.  6.]
+          # [ 4.  5.  6.  8. 10. 12.]
+          # [ 7.  8.  9. 14. 16. 18.]
+          # [ 3.  6.  9.  4.  8. 12.]
+          # [12. 15. 18. 16. 20. 24.]
+          # [21. 24. 27. 28. 32. 36.]]
+    """
+    if in_dygraph_mode():
+        return core.ops.kron(x, y)
+
+    helper = LayerHelper('kron', **locals())
+    check_variable_and_dtype(
+        x, 'x', ['float16', 'float32', 'float64', 'int32', 'int64'], 'kron')
+    check_variable_and_dtype(
+        y, 'y', ['float16', 'float32', 'float64', 'int32', 'int64'], 'kron')
+
+    if out is None:
+        out = helper.create_variable_for_type_inference(dtype=x.dtype)
+    else:
+        check_variable_and_dtype(
+            out, 'out', ['float16', 'float32', 'float64', 'int32', 'int64'],
+            'kron')
+    helper.append_op(type="kron", inputs={"X": x, "Y": y}, outputs={"Out": out})
+    return out
+
+
+def trace(input, offset=0, dim1=0, dim2=1, out=None, name=None):
+    """
+    This OP computes the sum along diagonals of the input tensor.
+    
+    If ``input`` is 2D, returns the sum of diagonal. 
+
+    If ``input`` has larger dimensions, then returns an tensor of diagonals sum, diagonals be taken from
+    the 2D planes specified by dim1 and dim2. By default, the 2D planes formed by the first and second dimensions 
+    of the input tensor.
+
+    The argument ``offset`` determines where diagonals are taken from input tensor:
+
+    - If offset = 0, it is the main diagonal.
+    - If offset > 0, it is above the main diagonal.
+    - If offset < 0, it is below the main diagonal.
+    
+    Args:
+        input(Variable): The input tensor. Must be at least 2-dimensional. The input data type should be float32, float64, int32, int64.
+        offset(int, optional): Which diagonals in input tensor will be taken. Default: 0 (main diagonals).
+        dim1(int, optional): The first dimension with respect to take diagonal. Default: 0.
+        dim2(int, optional): The second dimension with respect to take diagonal. Default: 1.
+        name (str, optional): Normally there is no need for user to set this property. For more information, please refer to :ref:`api_guide_Name`. Default: None.
+
+    Returns:
+        Variable: the output data type is the same as input data type.
+
+    Examples:
+        .. code-block:: python
+
+            import paddle.fluid as fluid
+            import paddle.fluid.dygraph as dg
+            import numpy as np
+            
+            case1 = np.random.randn(2, 3).astype('float32')
+            case2 = np.random.randn(3, 10, 10).astype('float32')
+            case3 = np.random.randn(3, 10, 5, 10).astype('float32')
+            
+            with dg.guard():
+                case1 = dg.to_variable(case1)
+                case2 = dg.to_variable(case2)
+                case3 = dg.to_variable(case3)
+                data1 = fluid.layers.trace(case1) # data1.shape = [1]
+                data2 = fluid.layers.trace(case2, offset=1, dim1=1, dim2=2) # data2.shape = [3]
+                data3 = fluid.layers.trace(case3, offset=-3, dim1=1, dim2=-1) # data2.shape = [3, 5]
+    """
+    inputs = {'Input': [input]}
+    attrs = {'offset': offset, 'dim1': dim1, 'dim2': dim2}
+
+    def __check_input(input, offset, dim1, dim2):
+        check_dtype(input.dtype, 'Input',
+                    ['int32', 'int64', 'float16', 'float32', 'float64'],
+                    'trace')
+
+        input_shape = list(input.shape)
+        assert len(input_shape) >= 2,                     \
+                "The input must be at least 2-dimensional, "   \
+                "But received Input's dimensional: %s.\n" %  \
+                len(input_shape)
+
+        dim1_ = dim1 if dim1 >= 0 else len(input_shape) + dim1
+        dim2_ = dim2 if dim2 >= 0 else len(input_shape) + dim2
+
+        assert dim1_ < len(input_shape),     \
+            "The argument dim1 is out of range (expected to be in range of [%d, %d], but got %d).\n"  \
+            % (-(len(input_shape)), len(input_shape) - 1, dim1)
+
+        assert dim2_ < len(input_shape),   \
+            "The argument dim2 is out of range (expected to be in range of [%d, %d], but got %d).\n"   \
+            % (-(len(input_shape)), len(input_shape) - 1, dim2)
+
+
+        assert  dim1_ != dim2_,   \
+               "dim1 and dim2 cannot be the same dimension." \
+                "But received dim1 = %d, dim2 = %d\n"%(dim1, dim2)
+
+    if not in_dygraph_mode():
+        __check_input(input, offset, dim1, dim2)
+    helper = LayerHelper('trace', **locals())
+
+    if out is None:
+        out = helper.create_variable_for_type_inference(dtype=input.dtype)
+    else:
+        check_variable_and_dtype(
+            out, 'out', ['float16', 'float32', 'float64', 'int32', 'int64'],
+            'trace')
+
+    helper.append_op(
+        type='trace',
+        inputs={'Input': [input]},
+        attrs={'offset': offset,
+               'dim1': dim1,
+               'dim2': dim2},
         outputs={'Out': [out]})
     return out
